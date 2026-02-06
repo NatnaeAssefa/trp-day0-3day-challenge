@@ -1,0 +1,28 @@
+# Project Chimera — AI review policy (Challenge Task 3.3)
+# Instructs the reviewer to check Spec Alignment and Security.
+
+language: en
+
+reviews:
+  profile: chimera
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  path_filters:
+    - "**/*.py"
+    - "**/specs/**"
+    - "**/skills/**"
+
+path_instructions:
+  - path: "**/*.py"
+    instructions: |
+      - Check that code aligns with specs: changes should implement or test behaviour defined in specs/_meta.md, specs/functional.md, or specs/technical.md. Flag any logic that is not traceable to a spec.
+      - Security: No hardcoded API keys, secrets, or credentials. Use environment variables or a secrets manager. Flag any suspicious patterns (e.g. eval, shell from user input).
+  - path: "specs/**"
+    instructions: |
+      - Ensure spec changes are consistent with the SRS (docs/Project Chimera SRS Document). New contracts (API, ERD) should be clearly defined.
+
+summary:
+  enabled: true
+  max_tokens: 500

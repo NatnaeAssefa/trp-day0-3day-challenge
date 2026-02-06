@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://project-chimera.dev/schemas/trend-api.json",
+  "title": "Trend API (list of trend items)",
+  "description": "Output shape for trend-fetching skills and MCP resources. specs/technical.md §3.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["id", "title", "relevance_score", "source", "timestamp"],
+    "properties": {
+      "id": { "type": "string", "description": "Unique identifier for the trend item." },
+      "title": { "type": "string", "description": "Short title or headline." },
+      "relevance_score": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1,
+        "description": "0.0–1.0."
+      },
+      "source": { "type": "string", "description": "Source identifier or URI." },
+      "timestamp": { "type": "string", "description": "ISO 8601 or Unix ms." }
+    }
+  }
+}

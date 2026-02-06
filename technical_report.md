@@ -204,45 +204,88 @@ Which means Chimera is **early, not late**.
 
 ## 5. Domain Architecture Strategy
 
-Architectural decisions and rationale for the Autonomous Influencer Network (aligned with SRS §2–3).
+Architectural decisions and rationale for the Autonomous Influencer Network (aligned with SRS §2–3). This section explicitly details the **chosen agent orchestration pattern** with justification, the **Human-in-the-Loop safety layer** design, and the **database strategy** with rationale.
 
-### 5.1 Agent Pattern: Hierarchical Swarm (FastRender)
+---
 
-**Recommendation:** Use the **FastRender** hierarchical swarm — Planner / Worker / Judge — as the core agent pattern.
+### 5.1 Chosen Agent Orchestration Pattern: Hierarchical Swarm (FastRender)
 
-**Rationale:**
+**Chosen pattern:** **Hierarchical Swarm (FastRender)** — a three-role architecture comprising **Planner**, **Worker**, and **Judge**, coordinated via queues (TaskQueue, ReviewQueue) and a shared GlobalState.
 
-- **SRS §3.1** defines the system around three roles: Planner (strategist), Worker (executor), Judge (gatekeeper). This is not a sequential chain but a swarm with a clear hierarchy and queues.
-- Chimera is orchestration-first; a16z and multi-agent literature indicate that **multi-agent systems outperform single monoliths** for complex, parallel workloads.
-- **Scalability:** Workers are stateless and share-nothing; the Planner can enqueue many tasks in parallel. The Judge centralises quality and governance without blocking Workers.
+**Explicit design:**
 
-**Alternatives considered:** Sequential chain (rejected — no parallel execution or clear separation of planning vs execution vs validation); flat swarm (rejected — no single point for plan decomposition and OCC; would complicate HITL and budget governance).
+| Role | Responsibility | Data flow |
+|------|----------------|-----------|
+| **Planner** | Reads GlobalState (campaign goals, trends, budget); decomposes goals into a DAG of tasks; pushes tasks to TaskQueue; reacts to Judge rejections by re-planning. | Input: GlobalState, MCP Resources (perception). Output: Task payloads to TaskQueue. |
+| **Worker** | Pops one task from TaskQueue; executes it using MCP Tools only; pushes a Result (artifact + confidence_score) to ReviewQueue. Stateless; no direct communication with other Workers. | Input: Task from TaskQueue. Output: Result to ReviewQueue. |
+| **Judge** | Pops Result from ReviewQueue; validates against acceptance criteria, persona, and safety rules; applies Optimistic Concurrency Control (OCC) on commit. Either commits to GlobalState, re-queues for Planner (reject/retry), or escalates to HITL. | Input: Result from ReviewQueue. Output: GlobalState updates or HITL queue entries. |
 
-### 5.2 Human-in-the-Loop (HITL): Judge Layer
+Orchestration is **centralised in the Planner** (single point of plan decomposition) and **quality/governance centralised in the Judge** (single gatekeeper for commits). Workers scale horizontally without coordination.
 
-**Recommendation:** HITL is implemented at the **Judge** layer only. No human approval inside Planner or Worker execution paths.
+**Justification for this pattern:**
 
-**Logic (per SRS §5.1):**
+1. **SRS alignment:** SRS §3.1 explicitly specifies Planner, Worker, and Judge with the above responsibilities. Adopting FastRender ensures traceability to the authoritative spec.
+2. **Parallelism and scale:** A single Planner can enqueue hundreds of tasks (e.g. “reply to 50 comments”); Workers consume in parallel. A sequential chain would serialise execution and become a bottleneck.
+3. **Separation of concerns:** Planning (what to do), execution (doing it), and validation (did we do it right) are distinct. Mixing them in one monolith increases cognitive load and makes governance (HITL, budget) harder to enforce.
+4. **Fault isolation:** A failing Worker does not bring down the Planner or Judge; the Judge can reject the result and the Planner can retry or re-plan.
 
-| Confidence score | Action |
-|------------------|--------|
-| **> 0.90** | Auto-approve; commit to GlobalState and proceed. |
-| **0.70 – 0.90** | Async approval; task added to Orchestrator Dashboard queue; human Approve/Reject later. |
-| **< 0.70** | Reject; signal Planner to retry with refined prompt or strategy. |
+**Alternatives considered and rejected:**
 
-**Additional rule:** Regardless of score, content that triggers **sensitive topic filters** (Politics, Health Advice, Financial Advice, Legal Claims) MUST be routed to the HITL queue for mandatory human review.
+- **Single monolithic agent:** Rejected — no parallelism, no clear validation gate, and governance (HITL, OCC) would be scattered.
+- **Sequential chain (Plan → Execute → Validate in one pipeline):** Rejected — no parallel Worker pool; throughput would not meet SRS targets (e.g. 1,000 concurrent agents).
+- **Flat swarm (peer-to-peer agents):** Rejected — no single point for plan decomposition or for enforcing OCC and HITL; budget and safety would require distributed consensus, adding complexity without benefit for this use case.
 
-The Judge is the only component that can commit Worker results to GlobalState; therefore it is the single enforcement point for HITL and confidence thresholds.
+---
 
-### 5.3 Database: SQL (PostgreSQL) + Weaviate + Redis
+### 5.2 Human-in-the-Loop (HITL) Safety Layer — Design
 
-**Recommendation:**
+**Design principle:** The HITL safety layer is implemented **only at the Judge**. No human approval is required inside the Planner or Worker execution paths. The Judge is the **single enforcement point** for quality and safety before any Worker output affects GlobalState or the outside world.
 
-- **Transactional and high-velocity metadata:** **PostgreSQL (SQL)** — campaigns, tasks, video metadata, audit logs, user/tenant data. Rationale: strong consistency, ACID, mature tooling; SRS §2.3 calls out PostgreSQL for user data and campaign configurations. High-velocity video metadata (asset records, status, platform) fits this model.
-- **Semantic memory:** **Weaviate** (vector DB). Per SRS §2.3 and FR 1.1: agent memories, persona definitions, world knowledge; RAG and long-term recall.
-- **Queues and episodic cache:** **Redis**. Per SRS §2.3: short-term memory and task queuing (TaskQueue, ReviewQueue, episodic window). Celery/BullMQ can sit on top.
+**Components of the HITL design:**
 
-**Why SQL over NoSQL for video metadata:** Video asset records require relational integrity (agent_id, campaign_id, character_reference_id), status transitions, and auditability. PostgreSQL supports JSONB for flexible metadata while keeping a clear schema; clustering and read replicas address high velocity.
+1. **Confidence scoring:** Every Worker output includes a `confidence_score` (0.0–1.0), produced by the model or a dedicated scoring step. This score is the primary input for routing.
+2. **Automated routing (Judge):** The Judge routes each Result according to the table below. Only two outcomes bypass immediate human review: **auto-approve** (high confidence) and **reject/retry** (low confidence, no human needed to reject).
+3. **HITL queue and dashboard:** Results in the medium-confidence band and all sensitive-topic results are written to an **HITL queue** consumed by the **Orchestrator Dashboard**. Humans (reviewers) see pending items and can Approve, Reject, or Edit. Approved items are committed to GlobalState by the system; rejected items signal the Planner to retry or drop.
+4. **Sensitive-topic override:** A **sensitive topic filter** (keyword or semantic) runs on every Result. If the content matches Politics, Health Advice, Financial Advice, or Legal Claims, the Result is **always** sent to the HITL queue, regardless of confidence. This satisfies “mandatory human review” for high-risk domains (SRS NFR 1.2).
+
+**Routing logic (explicit design):**
+
+| Confidence score | Judge action | Human in the loop? |
+|------------------|--------------|---------------------|
+| **> 0.90** | Auto-approve; commit to GlobalState; trigger next steps. | No. |
+| **0.70 – 0.90** | Do not commit immediately; add Result to Orchestrator Dashboard (HITL queue). Agent continues other work; this action stays pending until human Approve/Reject. | Yes (async). |
+| **< 0.70** | Reject; do not commit; signal Planner to retry with refined prompt or strategy. | No (automated reject). |
+| **Any score + sensitive topic** | Do not auto-approve; add Result to HITL queue for mandatory human review. | Yes. |
+
+**Rationale for thresholds:**
+
+- **0.90:** High confidence indicates the output is likely aligned with persona and safety; auto-approve keeps velocity high for the majority of cases.
+- **0.70–0.90:** Uncertainty is material; human review catches edge cases without blocking the agent on every task.
+- **< 0.70:** Low confidence suggests the task or prompt should be improved; retry is more useful than human review of clearly weak output.
+
+**Placement at Judge only:** The Judge is the only component that can write to GlobalState from Worker results. Therefore, all approval paths (auto or human) go through the Judge. This avoids duplicated safety logic and ensures a single audit trail for “who approved what.”
+
+---
+
+### 5.3 Database Strategy — Proposal and Rationale
+
+**Proposal:** Use a **three-store strategy** — **PostgreSQL** for transactional and high-velocity metadata, **Weaviate** for semantic memory, and **Redis** for queues and episodic cache. No single database is used for all workloads.
+
+**Explicit assignment and rationale:**
+
+| Store | Data assigned | Rationale |
+|-------|----------------|------------|
+| **PostgreSQL (SQL)** | User/tenant data; campaign definitions; task and result records (audit); **video asset metadata** (id, agent_id, task_id, platform, tier, character_reference_id, status, created_at, metadata JSONB). | **Consistency and auditability:** Campaigns, tasks, and video assets have relational integrity (e.g. video_assets.agent_id → agents, task_id → tasks). ACID and foreign keys prevent orphaned or inconsistent records. **Scale:** PostgreSQL supports read replicas and partitioning; high-velocity writes to video_assets can be batched or sharded by agent_id. SRS §2.3 explicitly specifies PostgreSQL for user data and campaign configurations; extending to video metadata keeps all transactional and audit data in one SQL model. |
+| **Weaviate (vector DB)** | Agent long-term memories; persona embeddings; world knowledge used for RAG. | **Semantic search:** SRS FR 1.1 requires “query Weaviate for semantic matches” for long-term recall. Relational DBs are not optimised for nearest-neighbour search over embeddings. Weaviate (or similar) is the right tool for RAG and “what the agent remembers.” |
+| **Redis** | TaskQueue; ReviewQueue; short-term (episodic) conversation history; session or rate-limit state. | **Throughput and latency:** Queues require fast push/pop and optional TTL. Redis is in-memory and supports list/stream structures; SRS §2.3 specifies Redis for short-term memory and task queuing. Episodic cache (e.g. last 1 hour) fits Redis; no need for durable SQL for this. |
+
+**Why SQL (PostgreSQL) over NoSQL for video metadata:**
+
+- **Relational integrity:** Video assets belong to an agent and a task; campaigns aggregate tasks. Foreign keys enforce referential integrity and simplify joins for reporting and compliance.
+- **Status and audit:** Status transitions (draft → judge_pending → approved → published) and timestamps are easy to model and query in SQL; JSONB allows flexible metadata without sacrificing schema for core fields.
+- **Operational maturity:** PostgreSQL has mature backup, replication, and tooling; scaling via read replicas or connection pooling is well understood. NoSQL would push schema and consistency into application code and complicate audits.
+
+**Why not a single database:** Mixing queues and vector search into PostgreSQL would either overload it (queues) or underuse it (vectors). Separating by workload (transactional vs semantic vs queue) lets each store be tuned and scaled appropriately and aligns with SRS §2.3.
 
 ### 5.4 Architecture Diagrams
 
@@ -324,10 +367,10 @@ sequenceDiagram
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Agent pattern | Hierarchical Swarm (FastRender) | SRS §3.1; orchestration-first; parallel Workers; single Judge for governance. |
-| HITL | Judge layer only | Single gatekeeper; confidence tiers and sensitive-topic override per SRS §5.1. |
+| Agent orchestration pattern | Hierarchical Swarm (FastRender) | SRS §3.1; explicit Planner/Worker/Judge roles; parallelism and fault isolation; single Judge for governance. |
+| HITL safety layer | Judge-only; confidence tiers + sensitive-topic override | Single enforcement point; auto-approve / async HITL / reject bands; mandatory human review for sensitive topics per SRS §5.1. |
 | Transactional DB | PostgreSQL (SQL) | Campaigns, tasks, video metadata, audit; ACID and relational integrity. |
 | Semantic memory | Weaviate | SRS §2.3, FR 1.1; RAG and long-term agent memory. |
 | Queues / episodic | Redis | SRS §2.3; TaskQueue, ReviewQueue, short-term cache. |
 
-This strategy keeps the codebase aligned with the SRS and positions Chimera as an orchestration-first, agent-native node suitable for future OpenClaw-style agent social networks.
+This strategy keeps the codebase aligned with the SRS and positions Chimera as an orchestration-first, agent-native node suitable for future OpenClaw-style agent social networks. The **agent orchestration pattern** is explicitly chosen and justified (§5.1); the **HITL safety layer** is designed with clear components, routing logic, and threshold rationale (§5.2); and the **database strategy** is proposed with explicit data assignment and rationale for each store (§5.3).

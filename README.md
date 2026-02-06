@@ -16,9 +16,12 @@ Spec-driven, Planner–Worker–Judge (FastRender) autonomous influencer system.
 
 ## Commands
 
-- `make setup` — Install dependencies.
-- `make test` — Run tests (in Docker or locally).
-- `make spec-check` — Optional spec/code alignment check.
+- `make setup` — Install dependencies (`uv sync` or `pip install -e .`).
+- `make test` — Run tests (Docker build + run, or `pytest` locally).
+- `make spec-check` — Verify specs/_meta.md, functional.md, technical.md.
+- `make lint` — Run ruff check and format check (requires `pip install ruff`).
+
+**Quickstart:** See [specs/main/quickstart.md](specs/main/quickstart.md) for setup, test commands, and implementation order (features 001–008).
 
 ## Specs
 

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://project-chimera.dev/schemas/worker-result-payload.json",
+  "title": "Worker Result (Worker → Judge)",
+  "description": "Payload pushed to ReviewQueue after a Worker completes a task. specs/technical.md §2.",
+  "type": "object",
+  "required": ["task_id", "status", "confidence_score", "created_at"],
+  "properties": {
+    "task_id": { "type": "string", "description": "Must match the Task that was executed." },
+    "status": {
+      "type": "string",
+      "enum": ["success", "failure"],
+      "description": "Outcome of the task execution."
+    },
+    "artifact": { "type": ["object", "string", "null"], "description": "Output (e.g. generated text, image URL, transaction hash)." },
+    "confidence_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "0.0–1.0; used by Judge for HITL routing."
+    },
+    "reasoning_trace": { "type": "string", "description": "Optional explanation for auditing." },
+    "created_at": { "type": "string", "format": "date-time", "description": "When the result was produced." }
+  }
+}
